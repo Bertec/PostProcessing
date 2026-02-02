@@ -101,6 +101,15 @@ namespace UnityEngine.Rendering.PostProcessing
         /// </summary>
         public FastApproximateAntialiasing fastApproximateAntialiasing;
 
+        // Frosted glass
+        public bool EnableFrostedGlass = false;
+        RenderTexture m_FrostedGlassSceneRT;
+        const int kFrostedDownsample = 2; // 2 = half-res, 4 = quarter-res
+
+        static readonly int FrostedGlassTex = Shader.PropertyToID("_FrostedGlassTex");
+
+        static readonly int FrostedGlassTex_TexelSize = Shader.PropertyToID("_FrostedGlassTex_TexelSize");
+
         /// <summary>
         /// Fog settings for this camera.
         /// </summary>
@@ -384,6 +393,13 @@ namespace UnityEngine.Rendering.PostProcessing
                     m_Camera.RemoveCommandBuffer(CameraEvent.BeforeImageEffectsOpaque, m_LegacyCmdBufferOpaque);
                 if (m_LegacyCmdBuffer != null)
                     m_Camera.RemoveCommandBuffer(CameraEvent.BeforeImageEffects, m_LegacyCmdBuffer);
+            }
+
+            if (m_FrostedGlassSceneRT != null)
+            {
+                m_FrostedGlassSceneRT.Release();
+                DestroyImmediate(m_FrostedGlassSceneRT);
+                m_FrostedGlassSceneRT = null;
             }
 
             temporalAntialiasing.Release();
@@ -1094,6 +1110,9 @@ namespace UnityEngine.Rendering.PostProcessing
                 if (hasAfterStackEffects)
                     lastTarget = RenderInjectionPoint(PostProcessEvent.AfterStack, context, "AfterStack", lastTarget);
 
+                // Publish scene color for frosted glass sampling by external shaders (UI/quad)
+                PublishFrostedGlassSource(context);
+                
                 // And close with the final pass
                 if (needsFinalPass)
                     RenderFinalPass(context, lastTarget, eye);
@@ -1440,6 +1459,54 @@ namespace UnityEngine.Rendering.PostProcessing
             bool autoExpo = GetBundle<AutoExposure>().settings.IsEnabledAndSupported(context);
             bool lightMeter = debugLayer.lightMeter.IsRequestedAndSupported(context);
             return autoExpo || lightMeter;
+        }
+
+        void EnsureFrostedGlassRT(PostProcessRenderContext context)
+        {
+            int w = Mathf.Max(1, context.width  / kFrostedDownsample);
+            int h = Mathf.Max(1, context.height / kFrostedDownsample);
+
+            if (m_FrostedGlassSceneRT != null && m_FrostedGlassSceneRT.IsCreated()
+                && m_FrostedGlassSceneRT.width == w && m_FrostedGlassSceneRT.height == h)
+                return;
+
+            if (m_FrostedGlassSceneRT != null)
+            {
+                m_FrostedGlassSceneRT.Release();
+                DestroyImmediate(m_FrostedGlassSceneRT);
+                m_FrostedGlassSceneRT = null;
+            }
+
+            m_FrostedGlassSceneRT = new RenderTexture(w, h, 0, context.sourceFormat, RenderTextureReadWrite.sRGB);
+            m_FrostedGlassSceneRT.name = "FrostedGlassSceneColor_HalfRes";
+            m_FrostedGlassSceneRT.filterMode = FilterMode.Bilinear;     // important for upsampling
+            m_FrostedGlassSceneRT.wrapMode = TextureWrapMode.Clamp;
+            m_FrostedGlassSceneRT.useMipMap = false;
+            m_FrostedGlassSceneRT.autoGenerateMips = false;
+            m_FrostedGlassSceneRT.Create();
+        }
+
+        void PublishFrostedGlassSource(PostProcessRenderContext context)
+        {
+            if(!EnableFrostedGlass)
+            {
+                return;
+            }
+            EnsureFrostedGlassRT(context);
+
+            var cmd = context.command;
+
+            // Copy the current per-eye color into a persistent RT (stable for late rendering)
+            cmd.BlitFullscreenTriangle(context.source, m_FrostedGlassSceneRT, RuntimeUtilities.copySheet, 0);
+
+            cmd.SetGlobalTexture(FrostedGlassTex, m_FrostedGlassSceneRT);
+            // TexelSize MUST match the half-res RT
+            cmd.SetGlobalVector(FrostedGlassTex_TexelSize, new Vector4(
+                1f / m_FrostedGlassSceneRT.width,
+                1f / m_FrostedGlassSceneRT.height,
+                m_FrostedGlassSceneRT.width,
+                m_FrostedGlassSceneRT.height
+            ));
         }
     }
 }
